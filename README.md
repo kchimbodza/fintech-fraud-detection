@@ -1,6 +1,29 @@
 # fintech-fraud-detection
 
-A financial transaction processor that flags suspicious amounts above the FINTRAC $10,000 CAD reporting threshold, deployed on a self-hosted 3-node Kubernetes cluster running on KVM/QEMU virtual machines.
+A financial transaction processor that flags amounts of $10,000 CAD or more (the FINTRAC reporting threshold), deployed on a self-hosted 3-node Kubernetes cluster running on KVM/QEMU virtual machines.
+
+The app is deliberately small (one rule). The point of the project is the platform around it: self-healing, autoscaling, load balancing and rolling updates on a cluster I built myself.
+
+**Key results** (from the screenshots below, recorded 10–11 March 2026):
+
+- 3/3 nodes Ready on k3s v1.34.4.
+- A deleted pod was replaced and Running again **2 s** later, with no manual step.
+- Under load the HPA scaled **1 → 5 pods** (each at 94–111m CPU against a 50m target), then back to **1 pod** (3m CPU) once the load stopped.
+
+## Architecture
+
+<p align="center"><img src="docs/architecture.svg" width="100%" alt="A client sends POST /transaction to a Kubernetes Service (LoadBalancer :80 to container port 8000, NodePort 31456 in the demos). The Service spreads requests over 1 to 5 FastAPI pods of the transaction-processor Deployment in the fintech namespace. An HPA adds pods when CPU is above 50 percent of the 100m request. Everything runs on k3s v1.34.4 across three Ubuntu 22.04 VMs (one control plane, two workers) on KVM/QEMU on Nobara Linux."></p>
+
+**Why this architecture**
+
+| Choice | Why |
+|---|---|
+| k3s on 3 KVM VMs (`infrastructure/create-vms.sh`) | Runs on my own laptop with no cloud account; the Deployments, Services and HPA are the same objects as on any Kubernetes cluster. |
+| 1 control plane + 2 workers | Pods have more than one node to land on, so scheduling and recovery are real, not single-machine. |
+| Small CPU request (100m) and limit (250m) | The HPA measures CPU as a % of the request; with 100m, a curl loop is enough to cross the 50% target and show scaling. |
+| Pod name injected with the Downward API (`POD_NAME`) | Every reply says which pod served it, so load balancing is visible without extra tools. |
+| Stateless FastAPI app with one rule | Any pod can answer any request, so pods can be added, killed and replaced safely; the focus stays on Kubernetes behaviour. |
+| Rolling update as a second manifest that only changes `APP_VERSION` | Shows the rollout mechanics on their own, without a new image build. |
 
 ## What This Demonstrates
 
@@ -18,6 +41,33 @@ A financial transaction processor that flags suspicious amounts above the FINTRA
 - **Nodes:** 3x Ubuntu 22.04 VMs (k3s-control, k3s-worker-1, k3s-worker-2)
 - **Kubernetes:** k3s v1.34.4
 - **App:** Python 3.11 + FastAPI
+
+## Results
+
+What was tested on the cluster and what the screenshots show. There are no automated tests or CI in this repo; these are manual runs.
+
+| Test | How | Result | Evidence |
+|---|---|---|---|
+| Cluster health | `kubectl get nodes` | 3/3 nodes Ready, v1.34.4+k3s1 | `screenshots/cluster-nodes.png` |
+| Rule above threshold | POST $15,000 (TD Bank) | `flagged`, `fintrac_report_required: true` | `screenshots/transaction-flagged.png` |
+| Rule below threshold | POST $8 (Tim Hortons) | `approved`, `fintrac_report_required: false` | `screenshots/transaction-approved.png` |
+| Self-healing | `kubectl delete pod` | Replacement pod 1/1 Running at age 2 s, 0 restarts | `screenshots/self-healing.png` |
+| Scale up | Parallel curl loops against NodePort 31456 | 5/5 pods Running (HPA max), 94–111m CPU and 35–38 Mi memory each | `screenshots/hpa-scale-up.png` |
+| Scale down | Stop the load | 1 pod left, 3m CPU (screenshot taken about 6.5 min after the scale-up one) | `screenshots/hpa-scale-down.png` |
+| Rolling update v1 → v2 | `scripts/demo-rolling-update.sh` | Not recorded: no screenshot or log of this run is in the repo | – |
+
+## What worked and what didn't
+
+| | What | Detail |
+|---|---|---|
+| ✅ | Self-healing | The ReplicaSet replaced a deleted pod in about 2 s with no manual step. |
+| ✅ | Autoscaling both ways | 1 → 5 pods under load and back to 1 when idle, driven only by `k8s/hpa.yaml`. |
+| ✅ | Visible load balancing | `handled_by` in every reply shows which pod answered |
+| ⚠️ | Slow scale-down | `hpa.yaml` has no `behavior` block, so Kubernetes' default 5-minute scale-down window applies: extra pods stay for minutes after the load stops. |
+| ❌ | No health probes | `deployment.yaml` has no readiness or liveness probe, so Kubernetes sends traffic as soon as the container starts. "Zero downtime" for the rolling update is the design intent, not a measured result. |
+| ❌ | Image name mismatch | The Deploy section builds `myviewsontech/fintech-fraud-detection:v1`, but the manifests pull `kchimbodza/fraud-detection-k8s:v1`. Tag the build to match the manifest (or edit it). |
+| ❌ | `scripts/load-test.sh` is sequential | It sends 200 requests one at a time with a 0.1 s pause. The scale-up screenshot used the parallel loop from [Demos](#demos) instead. |
+| ⚠️ | "Fraud detection" is one rule | The app checks one threshold (`amount >= 10000`). There is no scoring model and no tests for the rule. |
 
 ---
 
@@ -103,6 +153,8 @@ docker build -t myviewsontech/fintech-fraud-detection:v1 .
 docker push myviewsontech/fintech-fraud-detection:v1
 ```
 
+> `k8s/deployment.yaml` pulls `kchimbodza/fraud-detection-k8s:v1`. Use the same name when you tag, or change the `image:` line.
+
 ### 2. Deploy to cluster
 ```bash
 kubectl apply -f k8s/namespace.yaml
@@ -152,6 +204,8 @@ bash scripts/demo-rolling-update.sh
 
 ```
 fintech-fraud-detection/
+├── docs/
+│   └── architecture.svg
 ├── app/
 │   ├── main.py
 │   ├── Dockerfile
