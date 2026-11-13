@@ -105,7 +105,7 @@ What was tested on the cluster and what the screenshots show. There are no autom
 
 ### 6. HPA Scale-Up — 1 Pod Grows to 5 Under Load
 ![HPA Scale Up](screenshots/hpa-scale-up.png)
-*50 parallel workers flood the API with requests, pushing CPU usage to ~110m per pod (above the 50m threshold). The Horizontal Pod Autoscaler automatically scales from 1 pod to 5 pods to handle the load.*
+*The 50-loop curl command from [Demos](#demos) was started a second time while the first 50 were still running (background jobs [51]–[100] in the screenshot), so about 100 parallel loops flood the API, pushing CPU usage to ~110m per pod (above the 50m threshold). The Horizontal Pod Autoscaler automatically scales from 1 pod to 5 pods to handle the load.*
 
 ---
 
